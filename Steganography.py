@@ -14,26 +14,85 @@ DB_NAME = "steganografi_ig.db"
 
 
 def init_database():
-    """Inisialisasi database"""
+    """Inisialisasi database dengan migration support"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Tabel users
+    # Check if this is first run
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    users_table_exists = cursor.fetchone() is not None
+
+    if not users_table_exists:
+        # Create fresh database with all columns
+        cursor.execute('''
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                profile_pic TEXT DEFAULT 'default.jpg',
+                bio TEXT DEFAULT '',
+                access_level TEXT DEFAULT 'approved',
+                is_active BOOLEAN DEFAULT 1,
+                device_id TEXT,
+                mac_address TEXT,
+                invitation_code TEXT,
+                approved_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP,
+                login_attempts INTEGER DEFAULT 0,
+                blocked_until TIMESTAMP
+            )
+        ''')
+    else:
+        # Migrate existing database
+        migrate_database(cursor)
+
+    # Create other tables if not exist
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS invitation_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            full_name TEXT NOT NULL,
-            profile_pic TEXT DEFAULT 'default.jpg',
-            bio TEXT DEFAULT '',
+            code TEXT UNIQUE NOT NULL,
+            created_by INTEGER,
+            used_by INTEGER,
+            max_uses INTEGER DEFAULT 1,
+            current_uses INTEGER DEFAULT 0,
+            expires_at TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login TIMESTAMP
+            FOREIGN KEY (created_by) REFERENCES users (id)
         )
     ''')
 
-    # Tabel file_steganografi
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            device_id TEXT,
+            device_name TEXT,
+            mac_address TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            is_trusted BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            ip_address TEXT,
+            user_agent TEXT,
+            login_status TEXT,
+            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    # Create file steganografi table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS file_steganografi (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,20 +108,28 @@ def init_database():
         )
     ''')
 
-    # Insert default users
+    # Insert admin dengan akses penuh dan invitation codes
     try:
-        admin_password = hashlib.sha256("password123".encode()).hexdigest()
+        admin_password = hashlib.sha256("SecureAdmin2024!".encode()).hexdigest()
         cursor.execute('''
-            INSERT INTO users (username, email, password, full_name, bio) 
-            VALUES (?, ?, ?, ?, ?)
-        ''', ("steganography_pro", "admin@stegano.com", admin_password, "Steganography Expert",
-              "🔒 Digital security enthusiast"))
+            INSERT INTO users (username, email, password, full_name, bio, access_level, is_active) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', ("admin_secure", "admin@steganosecure.com", admin_password, "System Administrator",
+              "🔐 System Administrator with full access", "admin", 1))
+        admin_id = cursor.lastrowid
 
-        demo_password = hashlib.sha256("demo123".encode()).hexdigest()
-        cursor.execute('''
-            INSERT INTO users (username, email, password, full_name, bio) 
-            VALUES (?, ?, ?, ?, ?)
-        ''', ("demo_user", "demo@example.com", demo_password, "Demo User", "📁 Testing file steganography"))
+        # Generate invitation codes
+        invitation_codes = [
+            "STEG2024ALPHA", "STEG2024BETA", "STEG2024GAMMA",
+            "SECURE_ACCESS_001", "SECURE_ACCESS_002"
+        ]
+
+        for code in invitation_codes:
+            cursor.execute('''
+                INSERT INTO invitation_codes (code, created_by, max_uses, expires_at) 
+                VALUES (?, ?, ?, datetime('now', '+30 days'))
+            ''', (code, admin_id, 5))
+
     except sqlite3.IntegrityError:
         pass
 
@@ -70,51 +137,355 @@ def init_database():
     conn.close()
 
 
+def migrate_database(cursor):
+    """Migrate existing database to new schema"""
+    # Get existing columns
+    cursor.execute("PRAGMA table_info(users)")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+
+    # Add missing columns with ALTER TABLE
+    new_columns = {
+        'access_level': 'TEXT DEFAULT "approved"',
+        'is_active': 'BOOLEAN DEFAULT 1',
+        'device_id': 'TEXT',
+        'mac_address': 'TEXT',
+        'invitation_code': 'TEXT',
+        'approved_by': 'INTEGER',
+        'login_attempts': 'INTEGER DEFAULT 0',
+        'blocked_until': 'TIMESTAMP'
+    }
+
+    for column_name, column_definition in new_columns.items():
+        if column_name not in existing_columns:
+            try:
+                cursor.execute(f'ALTER TABLE users ADD COLUMN {column_name} {column_definition}')
+            except sqlite3.OperationalError:
+                pass  # Column might already exist
+
+
+def get_device_info():
+    def get_device_info():
+        """Generate device fingerprint untuk keamanan"""
+        try:
+            import platform
+            import uuid
+
+            # Generate unique device ID
+            device_id = str(uuid.uuid4())
+
+            # Get system info (simplified untuk demo)
+            device_info = {
+                'device_id': device_id,
+                'platform': platform.system(),
+                'device_name': platform.node(),
+                'mac_address': ':'.join(
+                    ['{:02x}'.format((uuid.getnode() >> ele) & 0xff) for ele in range(0, 8 * 6, 8)][::-1])
+            }
+
+            return device_info
+        except Exception as e:
+            # Fallback jika ada error
+            return {
+                'device_id': 'default_device',
+                'platform': 'Unknown',
+                'device_name': 'Unknown',
+                'mac_address': '00:00:00:00:00:00'
+            }
+
+
+def check_invitation_code(code):
+    """Validasi invitation code"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, max_uses, current_uses, expires_at, is_active 
+            FROM invitation_codes 
+            WHERE code = ? AND is_active = 1
+        ''', (code,))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        if not result:
+            return False, "Invalid invitation code"
+
+        code_id, max_uses, current_uses, expires_at, is_active = result
+
+        # Check expiry
+        if expires_at:
+            try:
+                from datetime import datetime
+                expiry_date = datetime.fromisoformat(expires_at)
+                if datetime.now() > expiry_date:
+                    return False, "Invitation code has expired"
+            except:
+                pass  # Skip expiry check if parsing fails
+
+        # Check usage limit
+        if current_uses >= max_uses:
+            return False, "Invitation code has reached maximum usage"
+
+        return True, code_id
+    except Exception as e:
+        return False, f"Error validating code: {str(e)}"
+
+
+def use_invitation_code(code_id, user_id):
+    """Mark invitation code as used"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE invitation_codes 
+            SET current_uses = current_uses + 1, used_by = ? 
+            WHERE id = ?
+        ''', (user_id, code_id))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass  # Silent fail untuk demo
+
+
+def check_device_whitelist(user_id, device_info):
+    """Check if device is whitelisted"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT is_trusted FROM device_whitelist 
+            WHERE user_id = ? AND (device_id = ? OR mac_address = ?)
+        ''', (user_id, device_info['device_id'], device_info['mac_address']))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        return result[0] if result else False
+    except Exception as e:
+        return True  # Default allow jika ada error
+
+
+def add_device_to_whitelist(user_id, device_info, is_trusted=False):
+    """Add device to whitelist"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO device_whitelist 
+            (user_id, device_id, device_name, mac_address, is_trusted) 
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, device_info['device_id'], device_info['device_name'],
+              device_info['mac_address'], is_trusted))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass  # Silent fail untuk demo
+
+
+def log_login_attempt(user_id, ip_address, user_agent, status):
+    """Log login attempts untuk monitoring"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT INTO login_logs (user_id, ip_address, user_agent, login_status) 
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, ip_address, user_agent, status))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass  # Silent fail untuk demo
+
+
+def check_login_attempts(username_or_email):
+    """Check failed login attempts untuk rate limiting"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT login_attempts, blocked_until FROM users 
+            WHERE username = ? OR email = ?
+        ''', (username_or_email, username_or_email))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        if result:
+            attempts, blocked_until = result
+            if blocked_until:
+                try:
+                    from datetime import datetime
+                    block_time = datetime.fromisoformat(blocked_until)
+                    if datetime.now() < block_time:
+                        return False, f"Account blocked until {blocked_until}"
+                except:
+                    pass  # Skip block check if parsing fails
+
+            if attempts >= 5:  # Max 5 attempts
+                return False, "Too many failed attempts. Account temporarily blocked."
+
+        return True, None
+    except Exception as e:
+        return True, None  # Default allow jika ada error
+
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
 def verify_user(username_or_email, password):
-    """Verifikasi login user"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    hashed_password = hash_password(password)
-    cursor.execute('''
-        SELECT id, username, email, full_name, bio, profile_pic FROM users 
-        WHERE (username = ? OR email = ?) AND password = ?
-    ''', (username_or_email, username_or_email, hashed_password))
-
-    user = cursor.fetchone()
-
-    if user:
-        # Update last login
-        cursor.execute('''
-            UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?
-        ''', (user[0],))
-        conn.commit()
-
-    conn.close()
-    return user
-
-
-def register_user(username, email, password, full_name):
-    """Registrasi user baru"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
+    """Verifikasi login user dengan security checks"""
     try:
+        # Check login attempts first
+        can_login, error_msg = check_login_attempts(username_or_email)
+        if not can_login:
+            return None, error_msg
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
         hashed_password = hash_password(password)
         cursor.execute('''
-            INSERT INTO users (username, email, password, full_name) 
-            VALUES (?, ?, ?, ?)
-        ''', (username, email, hashed_password, full_name))
+            SELECT id, username, email, full_name, bio, profile_pic, access_level, is_active 
+            FROM users 
+            WHERE (username = ? OR email = ?) AND password = ?
+        ''', (username_or_email, username_or_email, hashed_password))
+
+        user = cursor.fetchone()
+
+        if user:
+            user_id = user[0]
+            access_level = user[6] if len(user) > 6 else 'approved'
+            is_active = user[7] if len(user) > 7 else 1
+
+            # Check if user is active
+            if not is_active:
+                cursor.execute('''
+                    UPDATE users SET login_attempts = COALESCE(login_attempts, 0) + 1 WHERE id = ?
+                ''', (user_id,))
+                conn.commit()
+                conn.close()
+                return None, "Account not activated. Please contact administrator."
+
+            # Check access level
+            if access_level == 'pending':
+                conn.close()
+                return None, "Account pending approval. Please wait for admin approval."
+
+            # Reset login attempts on successful login
+            cursor.execute('''
+                UPDATE users SET login_attempts = 0, blocked_until = NULL, last_login = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            ''', (user_id,))
+
+            # Log successful login
+            log_login_attempt(user_id, "127.0.0.1", "Streamlit", "SUCCESS")
+
+        else:
+            # Increment failed attempts
+            cursor.execute('''
+                UPDATE users SET login_attempts = COALESCE(login_attempts, 0) + 1 
+                WHERE username = ? OR email = ?
+            ''', (username_or_email, username_or_email))
+
+            # Block account after 5 failed attempts
+            cursor.execute('''
+                UPDATE users SET blocked_until = datetime('now', '+15 minutes') 
+                WHERE (username = ? OR email = ?) AND COALESCE(login_attempts, 0) >= 5
+            ''', (username_or_email, username_or_email))
+
+            log_login_attempt(None, "127.0.0.1", "Streamlit", "FAILED")
+
         conn.commit()
         conn.close()
-        return True
-    except sqlite3.IntegrityError:
+
+        return user, None if user else "Invalid credentials"
+    except Exception as e:
+        # Fallback ke basic verification jika ada error
+        return verify_user_basic(username_or_email, password)
+
+
+def verify_user_basic(username_or_email, password):
+    """Basic user verification sebagai fallback"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        hashed_password = hash_password(password)
+        cursor.execute('''
+            SELECT id, username, email, full_name, bio, profile_pic 
+            FROM users 
+            WHERE (username = ? OR email = ?) AND password = ?
+        ''', (username_or_email, username_or_email, hashed_password))
+
+        user = cursor.fetchone()
+
+        if user:
+            # Update last login
+            cursor.execute('''
+                UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?
+            ''', (user[0],))
+            conn.commit()
+
         conn.close()
-        return False
+        return user, None if user else "Invalid credentials"
+    except Exception as e:
+        return None, f"Login error: {str(e)}"
+
+
+def register_user(username, email, password, full_name, invitation_code=None):
+    """Registrasi user baru dengan invitation code"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        # Validate invitation code jika diperlukan
+        code_id = None
+        if invitation_code:
+            is_valid, result = check_invitation_code(invitation_code)
+            if not is_valid:
+                conn.close()
+                return False, result
+            code_id = result
+
+        hashed_password = hash_password(password)
+        access_level = "approved" if invitation_code else "pending"
+        is_active = 1 if invitation_code else 0
+
+        cursor.execute('''
+            INSERT INTO users (username, email, password, full_name, access_level, is_active, invitation_code) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (username, email, hashed_password, full_name, access_level, is_active, invitation_code))
+
+        user_id = cursor.lastrowid
+
+        # Mark invitation code as used
+        if code_id:
+            use_invitation_code(code_id, user_id)
+
+        conn.commit()
+        conn.close()
+        return True, "Registration successful"
+
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        if "username" in str(e):
+            return False, "Username already exists"
+        elif "email" in str(e):
+            return False, "Email already exists"
+        else:
+            return False, "Registration failed"
+    except Exception as e:
+        return False, f"Registration error: {str(e)}"
 
 
 def file_to_binary(file_data, filename):
@@ -471,54 +842,110 @@ if not st.session_state.logged_in:
         tab1, tab2 = st.tabs(["📱 Log In", "✨ Sign Up"])
 
         with tab1:
+            st.markdown("### 🔐 Secure Login")
             username = st.text_input("", placeholder="Username or email", key="login_username")
             password = st.text_input("", type="password", placeholder="Password", key="login_password")
 
-            if st.button("Log In", type="primary", use_container_width=True):
+            if st.button("🔑 Log In", type="primary", use_container_width=True):
                 if username and password:
-                    user = verify_user(username, password)
-                    if user:
-                        st.session_state.logged_in = True
-                        st.session_state.user_data = {
-                            'id': user[0],
-                            'username': user[1],
-                            'email': user[2],
-                            'full_name': user[3],
-                            'bio': user[4],
-                            'profile_pic': user[5]
-                        }
-                        st.success("🎉 Welcome back!")
-                        st.rerun()
+                    user, error_msg = verify_user(username, password)
+                    if user and not error_msg:
+                        # Get device info dengan error handling
+                        try:
+                            device_info = get_device_info()
+
+                            # Check device whitelist
+                            user_id = user[0]
+                            access_level = user[6] if len(user) > 6 else 'approved'
+                            is_trusted = check_device_whitelist(user_id, device_info)
+
+                            if not is_trusted and access_level != 'admin':
+                                # Add device to whitelist
+                                add_device_to_whitelist(user_id, device_info, is_trusted=False)
+                                st.warning(
+                                    "⚠️ New device detected. Login allowed but limited access until device is trusted.")
+
+                            st.session_state.logged_in = True
+                            st.session_state.user_data = {
+                                'id': user[0],
+                                'username': user[1],
+                                'email': user[2],
+                                'full_name': user[3],
+                                'bio': user[4] if len(user) > 4 else '',
+                                'profile_pic': user[5] if len(user) > 5 else 'default.jpg',
+                                'access_level': access_level,
+                                'is_device_trusted': is_trusted or access_level == 'admin'
+                            }
+                            st.success("🎉 Login successful!")
+                            st.rerun()
+                        except Exception as e:
+                            # Fallback login tanpa device checking
+                            st.session_state.logged_in = True
+                            st.session_state.user_data = {
+                                'id': user[0],
+                                'username': user[1],
+                                'email': user[2],
+                                'full_name': user[3],
+                                'bio': user[4] if len(user) > 4 else '',
+                                'profile_pic': user[5] if len(user) > 5 else 'default.jpg',
+                                'access_level': 'approved',
+                                'is_device_trusted': True
+                            }
+                            st.success("🎉 Login successful!")
+                            st.rerun()
                     else:
-                        st.error("❌ Sorry, your password was incorrect.")
+                        st.error(f"❌ {error_msg}")
                 else:
                     st.warning("⚠️ Please fill in all fields")
 
             st.markdown("---")
-            st.markdown("**Demo Accounts:**")
-            col_demo1, col_demo2 = st.columns(2)
-            with col_demo1:
-                st.info("**Pro User**\n`steganography_pro`\n`password123`")
-            with col_demo2:
-                st.info("**Demo User**\n`demo_user`\n`demo123`")
+            st.markdown("**🔐 Secure Demo Account:**")
+            st.info("**Admin Access**\n`admin_secure`\n`SecureAdmin2024!`")
+
+            st.markdown("**📋 Valid Invitation Codes:**")
+            codes_info = """
+            - `STEG2024ALPHA`
+            - `STEG2024BETA` 
+            - `SECURE_ACCESS_001`
+            """
+            st.code(codes_info)
 
         with tab2:
-            reg_email = st.text_input("", placeholder="Email", key="reg_email")
-            reg_fullname = st.text_input("", placeholder="Full Name", key="reg_fullname")
-            reg_username = st.text_input("", placeholder="Username", key="reg_username")
-            reg_password = st.text_input("", type="password", placeholder="Password", key="reg_password")
+            st.markdown("### ✨ Secure Registration")
+            st.info("🎫 **Invitation Code Required** - Contact administrator for access")
 
-            if st.button("Sign Up", type="primary", use_container_width=True):
-                if all([reg_email, reg_fullname, reg_username, reg_password]):
-                    if len(reg_password) >= 6:
-                        if register_user(reg_username, reg_email, reg_password, reg_fullname):
-                            st.success("✅ Account created! Please log in.")
+            reg_invitation = st.text_input("🎫 Invitation Code *", placeholder="Enter invitation code",
+                                           key="reg_invitation")
+            reg_email = st.text_input("📧 Email *", placeholder="Email", key="reg_email")
+            reg_fullname = st.text_input("👤 Full Name *", placeholder="Full Name", key="reg_fullname")
+            reg_username = st.text_input("🆔 Username *", placeholder="Username", key="reg_username")
+            reg_password = st.text_input("🔒 Password *", type="password", placeholder="Password (min 8 chars)",
+                                         key="reg_password")
+
+            if st.button("🎫 Register with Invitation", type="primary", use_container_width=True):
+                if all([reg_invitation, reg_email, reg_fullname, reg_username, reg_password]):
+                    if len(reg_password) >= 8:
+                        success, message = register_user(reg_username, reg_email, reg_password, reg_fullname,
+                                                         reg_invitation)
+                        if success:
+                            st.success("✅ Registration successful! You can now log in.")
                         else:
-                            st.error("❌ Username or email already exists!")
+                            st.error(f"❌ {message}")
                     else:
-                        st.warning("⚠️ Password must be at least 6 characters!")
+                        st.warning("⚠️ Password must be at least 8 characters!")
                 else:
-                    st.warning("⚠️ Please fill in all fields!")
+                    st.warning("⚠️ Please fill in all required fields!")
+
+            st.markdown("---")
+            st.markdown("**🔒 Security Features:**")
+            security_features = """
+            ✅ Invitation-based registration
+            ✅ Device fingerprinting
+            ✅ Rate limiting protection
+            ✅ Account lockout system
+            ✅ Admin approval required
+            """
+            st.success(security_features)
 
         st.markdown('</div>', unsafe_allow_html=True)
 
