@@ -2,3 +2,4 @@ streamlit
 pycryptodome
 PyJWT
 bcrypt
+cryptography
