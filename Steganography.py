@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import hashlib
 import datetime
+import time
 from PIL import Image
 import numpy as np
 import io
@@ -49,17 +50,24 @@ def init_database():
     )
     ''')
 
-    # Tabel activity logs
+    # Tabel activity logs dengan kolom process_time
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS activity_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         activity_type TEXT NOT NULL,
         description TEXT,
+        process_time REAL DEFAULT NULL,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
     ''')
+
+    # Cek dan tambah kolom process_time jika belum ada (untuk database yang sudah ada)
+    cursor.execute("PRAGMA table_info(activity_logs)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'process_time' not in columns:
+        cursor.execute('ALTER TABLE activity_logs ADD COLUMN process_time REAL DEFAULT NULL')
 
     # Membuat admin pertama jika belum ada
     cursor.execute('SELECT COUNT(*) FROM users')
@@ -169,15 +177,15 @@ def generate_invitation_code(user_id):
     return code
 
 
-# Fungsi log aktivitas
-def log_activity(user_id, activity_type, description):
+# Fungsi log aktivitas dengan waktu proses
+def log_activity(user_id, activity_type, description, process_time=None):
     conn = sqlite3.connect('steganografi.db')
     cursor = conn.cursor()
 
     cursor.execute('''
-    INSERT INTO activity_logs (user_id, activity_type, description) 
-    VALUES (?, ?, ?)
-    ''', (user_id, activity_type, description))
+    INSERT INTO activity_logs (user_id, activity_type, description, process_time) 
+    VALUES (?, ?, ?, ?)
+    ''', (user_id, activity_type, description, process_time))
 
     conn.commit()
     conn.close()
@@ -190,7 +198,7 @@ def get_activities(user_id=None):
 
     if user_id:
         cursor.execute('''
-        SELECT u.username, a.activity_type, a.description, a.timestamp 
+        SELECT u.username, a.activity_type, a.description, a.process_time, a.timestamp 
         FROM activity_logs a 
         JOIN users u ON a.user_id = u.id 
         WHERE a.user_id = ?
@@ -198,7 +206,7 @@ def get_activities(user_id=None):
         ''', (user_id,))
     else:
         cursor.execute('''
-        SELECT u.username, a.activity_type, a.description, a.timestamp 
+        SELECT u.username, a.activity_type, a.description, a.process_time, a.timestamp 
         FROM activity_logs a 
         JOIN users u ON a.user_id = u.id 
         ORDER BY a.timestamp DESC LIMIT 100
@@ -207,6 +215,16 @@ def get_activities(user_id=None):
     activities = cursor.fetchall()
     conn.close()
     return activities
+
+
+# Fungsi untuk format waktu proses
+def format_process_time(process_time):
+    if process_time is None:
+        return "N/A"
+    elif process_time < 1:
+        return f"{process_time * 1000:.0f} ms"
+    else:
+        return f"{process_time:.2f} s"
 
 
 # Fungsi untuk mengkonversi data ke binary
@@ -229,6 +247,8 @@ def binary_to_data(binary_str):
 # Fungsi steganografi - Hide File
 def hide_file_in_image(image, file_data, filename):
     """Menyembunyikan file dalam gambar menggunakan LSB steganografi"""
+    start_time = time.time()
+
     # Konversi ke RGB jika perlu dan buat copy
     if image.mode != 'RGB':
         image = image.convert('RGB')
@@ -263,7 +283,7 @@ def hide_file_in_image(image, file_data, filename):
     # Cek kapasitas
     if len(data_bits) > len(flat_img):
         max_size = (len(flat_img) - 32) // 8  # -32 untuk delimiter
-        return None, f"File terlalu besar! Maksimal: {max_size:,} bytes, File: {len(full_data):,} bytes"
+        return None, f"File terlalu besar! Maksimal: {max_size:,} bytes, File: {len(full_data):,} bytes", 0
 
     # Sembunyikan data bit per bit
     for i in range(len(data_bits)):
@@ -271,12 +291,16 @@ def hide_file_in_image(image, file_data, filename):
 
     # Reshape kembali
     hidden_img = flat_img.reshape(img_array.shape)
-    return Image.fromarray(hidden_img), "Success"
+    process_time = time.time() - start_time
+
+    return Image.fromarray(hidden_img), "Success", process_time
 
 
 # Fungsi steganografi - Extract File
 def extract_file_from_image(image):
     """Mengekstrak file dari gambar"""
+    start_time = time.time()
+
     # Konversi ke RGB jika perlu
     if image.mode != 'RGB':
         image = image.convert('RGB')
@@ -294,14 +318,14 @@ def extract_file_from_image(image):
     end_index = binary_data.find(delimiter)
 
     if end_index == -1:
-        return None, None, "Tidak ada data tersembunyi atau delimiter tidak ditemukan"
+        return None, None, "Tidak ada data tersembunyi atau delimiter tidak ditemukan", 0
 
     # Ambil data sebelum delimiter
     data_bits = binary_data[:end_index]
 
     # Pastikan panjang data kelipatan 8
     if len(data_bits) % 8 != 0:
-        return None, None, "Data bits tidak valid (bukan kelipatan 8)"
+        return None, None, "Data bits tidak valid (bukan kelipatan 8)", 0
 
     try:
         # Konversi bits ke bytes
@@ -314,47 +338,48 @@ def extract_file_from_image(image):
 
         # Cek magic header
         if len(data_bytes) < 4 or data_bytes[:4] != b'STEG':
-            return None, None, "Magic header tidak ditemukan - bukan file tersembunyi"
+            return None, None, "Magic header tidak ditemukan - bukan file tersembunyi", 0
 
         # Parse header
         if len(data_bytes) < 8:
-            return None, None, "Header terlalu pendek"
+            return None, None, "Header terlalu pendek", 0
 
         # Ambil panjang nama file
         filename_length = int.from_bytes(data_bytes[4:8], byteorder='big')
 
         if filename_length > 255 or filename_length < 1:
-            return None, None, f"Panjang nama file tidak valid: {filename_length}"
+            return None, None, f"Panjang nama file tidak valid: {filename_length}", 0
 
         # Cek apakah cukup data untuk nama file
         header_end = 8 + filename_length + 4
         if len(data_bytes) < header_end:
-            return None, None, f"Data tidak cukup untuk header lengkap. Butuh: {header_end}, Ada: {len(data_bytes)}"
+            return None, None, f"Data tidak cukup untuk header lengkap. Butuh: {header_end}, Ada: {len(data_bytes)}", 0
 
         # Ambil nama file
         try:
             filename = data_bytes[8:8 + filename_length].decode('utf-8')
         except UnicodeDecodeError:
-            return None, None, "Nama file tidak dapat di-decode"
+            return None, None, "Nama file tidak dapat di-decode", 0
 
         # Ambil ukuran file
         file_size = int.from_bytes(data_bytes[8 + filename_length:header_end], byteorder='big')
 
         if file_size < 0 or file_size > 100 * 1024 * 1024:  # Max 100MB
-            return None, None, f"Ukuran file tidak valid: {file_size}"
+            return None, None, f"Ukuran file tidak valid: {file_size}", 0
 
         # Cek apakah cukup data untuk file
         total_needed = header_end + file_size
         if len(data_bytes) < total_needed:
-            return None, None, f"Data file tidak lengkap. Butuh: {total_needed}, Ada: {len(data_bytes)}, Header: {header_end}, File size: {file_size}"
+            return None, None, f"Data file tidak lengkap. Butuh: {total_needed}, Ada: {len(data_bytes)}, Header: {header_end}, File size: {file_size}", 0
 
         # Ambil data file
         file_data = data_bytes[header_end:header_end + file_size]
 
-        return file_data, filename, "Success"
+        process_time = time.time() - start_time
+        return file_data, filename, "Success", process_time
 
     except Exception as e:
-        return None, None, f"Error saat parsing: {str(e)}"
+        return None, None, f"Error saat parsing: {str(e)}", 0
 
 
 # Fungsi untuk download gambar
@@ -448,7 +473,7 @@ def main():
         ### 🚀 Fitur Aplikasi:
         - 📁 **Hide File**: Sembunyikan file apapun dalam gambar
         - 🔍 **Extract File**: Ekstrak file tersembunyi dari gambar  
-        - 📊 **Activity Log**: Pantau semua aktivitas
+        - 📊 **Activity Log**: Pantau semua aktivitas dengan waktu proses
         - 🎫 **Invitation System**: Sistem undangan eksklusif
         """)
 
@@ -501,10 +526,10 @@ def main():
             if cover_image is not None and secret_file is not None:
                 if st.button("🔒 Sembunyikan File", type="primary"):
                     with st.spinner("Menyembunyikan file..."):
-                        hidden_image, status = hide_file_in_image(image, file_data, secret_file.name)
+                        hidden_image, status, process_time = hide_file_in_image(image, file_data, secret_file.name)
 
                         if hidden_image is not None:
-                            st.success("✅ File berhasil disembunyikan!")
+                            st.success(f"✅ File berhasil disembunyikan dalam {format_process_time(process_time)}!")
                             st.image(hidden_image, caption="Gambar dengan File Tersembunyi", width=300)
 
                             # Download link
@@ -516,7 +541,8 @@ def main():
                             log_activity(
                                 st.session_state.user['id'],
                                 "HIDE_FILE",
-                                f"Hidden file {secret_file.name} in image {cover_image.name}"
+                                f"Hidden file {secret_file.name} ({file_size:,} bytes) in image {cover_image.name}",
+                                process_time
                             )
                         else:
                             st.error(f"❌ {status}")
@@ -536,10 +562,10 @@ def main():
 
                 if st.button("📁 Ekstrak File", type="primary"):
                     with st.spinner("Mengekstrak file..."):
-                        file_data, filename, status = extract_file_from_image(image)
+                        file_data, filename, status, process_time = extract_file_from_image(image)
 
                         if file_data is not None:
-                            st.success(f"✅ File ditemukan: {filename}")
+                            st.success(f"✅ File ditemukan dalam {format_process_time(process_time)}: {filename}")
                             st.info(f"📊 Ukuran file: {len(file_data):,} bytes")
 
                             # Download link
@@ -551,7 +577,8 @@ def main():
                             log_activity(
                                 st.session_state.user['id'],
                                 "EXTRACT_FILE",
-                                f"Extracted file {filename} from image: {extract_file.name}"
+                                f"Extracted file {filename} ({len(file_data):,} bytes) from image {extract_file.name}",
+                                process_time
                             )
                         else:
                             st.error(f"❌ {status}")
@@ -576,8 +603,24 @@ def main():
 
             if activities:
                 st.write("### Aktivitas Terbaru")
+
+                # Tabel untuk menampilkan aktivitas dengan format yang rapi
+                cols = st.columns([2, 2, 4, 2, 3])
+                with cols[0]:
+                    st.write("**Username**")
+                with cols[1]:
+                    st.write("**Aktivitas**")
+                with cols[2]:
+                    st.write("**Deskripsi**")
+                with cols[3]:
+                    st.write("**Waktu Proses**")
+                with cols[4]:
+                    st.write("**Timestamp**")
+
+                st.divider()
+
                 for activity in activities:
-                    username, activity_type, description, timestamp = activity
+                    username, activity_type, description, process_time, timestamp = activity
 
                     # Icon berdasarkan jenis aktivitas
                     icons = {
@@ -590,9 +633,54 @@ def main():
                     }
                     icon = icons.get(activity_type, '📋')
 
-                    with st.expander(f"{icon} {activity_type} - {username} - {timestamp}"):
-                        st.write(f"**Deskripsi:** {description}")
-                        st.write(f"**Waktu:** {timestamp}")
+                    # Tampilkan dalam kolom
+                    cols = st.columns([2, 2, 4, 2, 3])
+                    with cols[0]:
+                        st.write(username)
+                    with cols[1]:
+                        st.write(f"{icon} {activity_type}")
+                    with cols[2]:
+                        st.write(description)
+                    with cols[3]:
+                        if process_time is not None:
+                            st.write(f"⏱️ {format_process_time(process_time)}")
+                        else:
+                            st.write("N/A")
+                    with cols[4]:
+                        st.write(timestamp)
+
+                # Statistik waktu proses
+                if any(activity[3] for activity in activities if activity[3] is not None):
+                    st.divider()
+                    st.subheader("📈 Statistik Waktu Proses")
+
+                    # Filter aktivitas yang memiliki waktu proses
+                    process_activities = [(act[1], act[3]) for act in activities if act[3] is not None]
+
+                    if process_activities:
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.write("**Rata-rata Waktu Proses per Aktivitas:**")
+                            activity_times = {}
+                            for act_type, proc_time in process_activities:
+                                if act_type not in activity_times:
+                                    activity_times[act_type] = []
+                                activity_times[act_type].append(proc_time)
+
+                            for act_type, times in activity_times.items():
+                                avg_time = sum(times) / len(times)
+                                st.write(f"• {icons.get(act_type, '📋')} {act_type}: {format_process_time(avg_time)}")
+
+                        with col2:
+                            all_times = [time for _, time in process_activities]
+                            if all_times:
+                                st.write("**Statistik Keseluruhan:**")
+                                st.write(f"• Tercepat: {format_process_time(min(all_times))}")
+                                st.write(f"• Terlama: {format_process_time(max(all_times))}")
+                                st.write(f"• Rata-rata: {format_process_time(sum(all_times) / len(all_times))}")
+                                st.write(f"• Total proses: {len(all_times)} aktivitas")
+
             else:
                 st.info("Belum ada aktivitas")
 
