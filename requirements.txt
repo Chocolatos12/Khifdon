@@ -3,3 +3,4 @@ pycryptodome
 PyJWT
 bcrypt
 cryptography
+soundfile
